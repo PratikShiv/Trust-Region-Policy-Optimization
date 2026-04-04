@@ -292,12 +292,12 @@ def parse_args():
 
     # algorithm
     p.add_argument("--iterations", type=int, default=500)
-    p.add_argument("--batch_size", type=int, default=4096)
-    p.add_argument("--max_kl", type=float, default=0.01)
+    p.add_argument("--batch_size", type=int, default=15000)
+    p.add_argument("--max_kl", type=float, default=0.003)
     p.add_argument("--damping", type=float, default=0.1)
     p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--lam", type=float, default=0.97)
-    p.add_argument("--value_lr", type=float, default=3e-4)
+    p.add_argument("--lam", type=float, default=0.95)
+    p.add_argument("--value_lr", type=float, default=3e-5)
     p.add_argument("--value_epochs", type=int, default=5)
     p.add_argument("--cg_iters", type=int, default=10)
     p.add_argument("--hidden", type=int, default=256)
