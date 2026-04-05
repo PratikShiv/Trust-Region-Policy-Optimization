@@ -37,7 +37,6 @@ Schulman et al., "Trust Region Policy Optimization," ICML 2015.
 
 ![Checkpoint 1 Behavior](results/checkpoint_1_output.gif)
 
-- The gif is a strong qualitative artifact for locomotion behavior and command tracking.
 
 ### Training Diagnostics
 - `results/reward_mean_during_training.png` shows mean episode return over training iterations.
