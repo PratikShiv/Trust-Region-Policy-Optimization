@@ -39,6 +39,7 @@ from enviorment_wrapper import VelocityAntEnv
 #   - ValueNetwork:   not needed at test time, but we import it
 #                     so we could inspect it if we wanted.
 from models import PolicyNetwork
+from trpo import RunningMeanStd
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -88,14 +89,21 @@ def load_trained_policy(checkpoint_path, device="cpu"):
     # batch-norm / dropout (we don't use either), but it's good practice.
     policy.eval()
 
-    return policy, ckpt
+    obs_rms = None
+    if "obs_rms" in ckpt:
+        obs_rms = RunningMeanStd(shape=(obs_dim,))
+        obs_rms.mean = ckpt["obs_rms"]["mean"]
+        obs_rms.var = ckpt["obs_rms"]["var"]
+        obs_rms.count = ckpt["obs_rms"]["count"]
+
+    return policy, obs_rms, ckpt
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Helper: pick an action from the policy
 # ─────────────────────────────────────────────────────────────────────
 
-def select_action(policy, obs_numpy, stochastic, device="cpu"):
+def select_action(policy, obs_numpy, stochastic, device="cpu", obs_rms=None):
     """
     Given a numpy observation, ask the policy network for an action.
 
@@ -114,6 +122,9 @@ def select_action(policy, obs_numpy, stochastic, device="cpu"):
     action : np.ndarray of shape (act_dim,)
     """
     # Convert numpy → torch tensor, add a batch dimension [1, obs_dim]
+    if obs_rms is not None:
+        obs_numpy = obs_rms.normalize(obs_numpy).astype(np.float32)
+
     obs_tensor = torch.as_tensor(
         obs_numpy, dtype=torch.float32, device=device
     ).unsqueeze(0)
@@ -142,7 +153,7 @@ def run_evaluation(args):
 
     # ── 1. Load the trained policy from the checkpoint file ───────────
     print(f"Loading checkpoint: {args.checkpoint}")
-    policy, ckpt = load_trained_policy(args.checkpoint, device=device)
+    policy, obs_rms, ckpt = load_trained_policy(args.checkpoint, device=device)
 
     train_iter = ckpt.get("iteration", "?")
     train_reward = ckpt.get("best_reward", "?")
@@ -214,7 +225,7 @@ def run_evaluation(args):
 
             while not done:
                 # Ask the policy for an action.
-                action = select_action(policy, obs, args.stochastic, device)
+                action = select_action(policy, obs, args.stochastic, device, obs_rms=obs_rms)
 
                 # Clip to the environment's valid action range.
                 # The Ant has 8 torque-controlled joints, each in [-1, 1].

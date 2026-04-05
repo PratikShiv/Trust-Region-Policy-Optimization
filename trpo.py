@@ -29,6 +29,41 @@ import numpy as np
 import torch
 
 # -----------------------------------------------------------------------------
+# Running statistics for observation / return normalization
+class RunningMeanStd:
+    """Welford's online algorithm for tracking mean and variance"""
+    def __init__(self, shape=(), clip=10.0):
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var = np.ones(shape, dtype=np.float64)
+        self.count = 1e-4
+        self.clip = clip
+
+    def update(self, batch):
+        batch = np.asarray(batch, dtype=np.float64)
+        if batch.ndim == 1:
+            batch = batch[np.newaxis, :]
+        batch_mean = batch.mean(axis=0)
+        batch_var = batch.var(axis=0)
+        batch_count = batch.shape[0]
+
+        delta = batch_mean - self.mean
+        total = self.count + batch_count
+        self.mean = self.mean + delta * batch_count / total
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta ** 2 * self.count * batch_count / total
+        self.var = m2/total
+        self.count = total
+
+    def normalize(self, x):
+        return np.clip(
+            (x - self. mean.astype(np.float32)) / (np.sqrt(self.var).astype(np.float32) + 1e-8),
+            -self.clip,
+            self.clip,
+        )
+
+
+# -----------------------------------------------------------------------------
 # Utility Header
 
 def flat_params(model):
@@ -274,6 +309,7 @@ class TRPOAgent:
             loss = (returns - pred).pow(2).mean()
             self.value_optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.value_fn.parameters(), 0.5)
             self.value_optimizer.step()
             total_loss += loss.item()
         

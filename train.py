@@ -19,7 +19,7 @@ import torch
 
 from enviorment_wrapper import VelocityAntEnv
 from models import PolicyNetwork, ValueNetwork
-from trpo import TRPOAgent, comput_gae
+from trpo import TRPOAgent, comput_gae, RunningMeanStd
 
 # wandb is optional
 wandb = None
@@ -56,11 +56,11 @@ def _init_wandb(args):
 # ---------------------------------------------------------------------------------------
 # Save / Load Checkpoints
 def save_checkpoint(path, policy, value_fn, value_optimizer,
-                    iteration, total_steps, best_reward, args):
+                    iteration, total_steps, best_reward, args,
+                    obs_rms=None, ret_rms=None):
     # Persist everything needed to fully resume training later
 
-    torch.save(
-        {
+    ckpt = {
             "policy_state": policy.state_dict(),
             "value_fn_state": value_fn.state_dict(),
             "value_optimizer_state": value_optimizer.state_dict(),
@@ -73,9 +73,12 @@ def save_checkpoint(path, policy, value_fn, value_optimizer,
             "hidden": list(policy.mean_net[0].weight.shape)[0],
             # Keep the full CLI args so that test script knows every setting
             "args": vars(args)
-        },
-        path,
-    )
+    }
+    if obs_rms is not None:
+        ckpt["obs_rms"] = {"mean": obs_rms.mean, "var": obs_rms.var, "count": obs_rms.count}
+    if ret_rms is not None:
+        ckpt["ret_rms"] = {"mean": ret_rms.mean, "var": ret_rms.var, "count": ret_rms.count}
+    torch.save(ckpt, path)
 
 
 def load_checkpoint(path, device="cpu"):
@@ -86,7 +89,8 @@ def load_checkpoint(path, device="cpu"):
 # -----------------------------------------------------------------------------
 # Trajectory Collection. This single path method from Section 5.
 
-def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
+def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device,
+                    obs_rms=None, ret_rms=None):
     # Roll out the policy, returning a batch dict and episode statistics
     observations, actions, rewards = [], [], []
     dones, log_probs, values = [], [], []
@@ -94,12 +98,20 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
     episode_lengths = []
     val_errors = []
 
-    obs, _ = env.reset()
+    obs_raw, _ = env.reset()
     ep_return = 0.0
     ep_length = 0
     steps = 0
 
+    raw_obs_buffer = []
+
     while steps < batch_size:
+        raw_obs_buffer.append(obs_raw.copy())
+
+        if obs_rms is not None:
+            obs = obs_rms.normalize(obs_raw).astype(np.float32)
+        else:
+            obs = obs_raw
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
 
         with torch.no_grad():
@@ -109,7 +121,7 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
         action_np = action.squeeze(0).cpu().numpy()
         action_clipped = np.clip(action_np, env.action_space.low, env.action_space.high)
 
-        next_obs, reward, terminated, truncated, info = env.step(action_clipped)
+        next_obs_raw, reward, terminated, truncated, info = env.step(action_clipped)
         done = terminated or truncated
 
         observations.append(obs)
@@ -122,7 +134,7 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
         ep_return += reward
         ep_length += 1
         steps += 1
-        obs = next_obs
+        obs_raw = next_obs_raw
         
 
         if "velocity_error_xy" in info:
@@ -133,7 +145,10 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
             episode_lengths.append(ep_length)
             ep_return = 0.0
             ep_length = 0.0
-            obs, _ = env.reset()
+            obs_raw, _ = env.reset()
+        
+    if obs_rms is not None:
+        obs_rms.update(np.array(raw_obs_buffer, dtype=np.float64))
 
     advantages, returns = comput_gae(
         np.array(rewards, dtype=np.float32),
@@ -142,6 +157,10 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
         gamma=gamma,
         lam=lam,
     )
+
+    if ret_rms is not None:
+        ret_rms.update(returns)
+        returns = ret_rms.normalize(returns).astype(np.float32)
 
     batch = {
         "observations": np.array(observations, dtype=np.float32),
@@ -200,6 +219,9 @@ def train(args):
         device = device
     )
 
+    obs_rms = RunningMeanStd(shape=(obs_dim,))
+    ret_rms = RunningMeanStd(shape=())
+
     # Bookkeeping
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -217,6 +239,14 @@ def train(args):
         start_iter = ckpt["iteration"]+1
         total_steps = ckpt["total_steps"]
         best_reward = ckpt["best_rewards"]
+        if "obs_rms" in ckpt:
+            obs_rms.mean = ckpt["obs_rms"]["mean"]
+            obs_rms.var = ckpt["obs_rms"]["var"]
+            obs_rms.count = ckpt["obs_rms"]["count"]
+        if "ret_rms" in ckpt:
+            ret_rms.mean = ckpt["ret_rms"]["mean"]
+            ret_rms.var = ckpt["ret_rms"]["var"]
+            ret_rms.count = ckpt["ret_rms"]["count"]
         print(f"  -> continuing from iteration {start_iter}, "
                f"total_steps={total_steps:,}, best_reward={best_reward:.2f}")
         
@@ -229,7 +259,9 @@ def train(args):
             batch_size=args.batch_size,
             gamma=args.gamma,
             lam=args.lam,
-            device=device
+            device=device,
+            obs_rms=obs_rms,
+            ret_rms=ret_rms
         )
         total_steps += len(batch["rewards"])
 
@@ -269,6 +301,8 @@ def train(args):
                 save_dir / "best_model.pt",
                 policy, value_fn, agent.value_optimizer,
                 it, total_steps, best_reward, args,
+                obs_rms=obs_rms,
+                ret_rms=ret_rms
             )
 
         if it % args.save_every == 0:
@@ -276,6 +310,8 @@ def train(args):
                 save_dir / f"ckpt_{it}.pt",
                 policy, value_fn, agent.value_optimizer,
                 args.iterations, total_steps, best_reward, args,
+                obs_rms=obs_rms,
+                ret_rms=ret_rms
             )
 
     env.close()
@@ -293,13 +329,13 @@ def parse_args():
 
     # algorithm
     p.add_argument("--iterations", type=int, default=500)
-    p.add_argument("--batch_size", type=int, default=15000)
+    p.add_argument("--batch_size", type=int, default=4096)
     p.add_argument("--max_kl", type=float, default=0.003)
     p.add_argument("--damping", type=float, default=0.1)
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--lam", type=float, default=0.95)
-    p.add_argument("--value_lr", type=float, default=3e-5)
-    p.add_argument("--value_epochs", type=int, default=5)
+    p.add_argument("--value_lr", type=float, default=1e-4)
+    p.add_argument("--value_epochs", type=int, default=10)
     p.add_argument("--cg_iters", type=int, default=10)
     p.add_argument("--hidden", type=int, default=256)
     p.add_argument("--seed", type=int, default=42)
