@@ -107,13 +107,13 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
             val = value_fn(obs_t)
 
         action_np = action.squeeze(0).cpu().numpy()
-        action_np = np.clip(action_np, env.action_space.low, env.action_space.high)
+        action_clipped = np.clip(action_np, env.action_space.low, env.action_space.high)
 
-        next_obs, reward, terminated, truncated, info = env.step(action_np)
+        next_obs, reward, terminated, truncated, info = env.step(action_clipped)
         done = terminated or truncated
 
         observations.append(obs)
-        actions.append(action_np)
+        actions.append(action_np) # Store unclipped so log probs stay consistent
         rewards.append(reward)
         dones.append(done)
         log_probs.append(lp.item())
