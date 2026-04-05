@@ -211,7 +211,7 @@ def run_evaluation(args):
             if use_fixed_cmd:
                 env._cmd_vel = fixed_cmd.copy()
                 # Re-augment observation with the fixed command.
-                obs = np.concatenate([obs[:27], fixed_cmd]).astype(np.float32)
+                obs = np.concatenate([obs[:-4], fixed_cmd]).astype(np.float32)
 
             done = False
             ep_return = 0.0       # total reward this episode
