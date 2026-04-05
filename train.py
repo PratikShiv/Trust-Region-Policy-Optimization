@@ -123,8 +123,9 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device):
         ep_length += 1
         steps += 1
         obs = next_obs
+        
 
-        if "veloctiy_error_xy" in info:
+        if "velocity_error_xy" in info:
             val_errors.append(info["velocity_error_xy"])
 
         if done:

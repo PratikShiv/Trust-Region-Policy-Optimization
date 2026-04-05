@@ -87,11 +87,14 @@ class VelocityAntEnv(gym.Wrapper):
     # Velocity Command Sampling
 
     def _sample_velocity_command(self):
+        # Sample a random direction
+        vx = np.random.uniform(0.5, 2.0)
+        vy = np.random.uniform(-0.5, 0.5)
         return np.array([
-            np.random.uniform(-0.5, 2.0),   # Vx (Forward / Backward)
-            np.random.uniform(-0.8, 0.8),   # Vy (Lateral)
+            vx,   # Vx (Forward / Backward)
+            vy,   # Vy (Lateral)
             0.0,                            # Vz
-            np.random.uniform(-0.8, 0.8),   # Yaw Rate
+            np.random.uniform(-0.5, 0.5),   # Yaw Rate
         ], dtype=np.float32)
     
 
@@ -160,10 +163,11 @@ class VelocityAntEnv(gym.Wrapper):
 
         roll, pitch, _ = quat_to_rpy(quat)
 
-        # 1. Velocity Tracking. (Exponential peaks at 1.0 per term)
-        r_vel_xy = np.exp(-2.0 * ((vx - cmd_vx) **2 + (vy - cmd_vy) **2))
-        r_yaw = np.exp(-1.5 * (yaw_rate - cmd_yaw) **2)
-        r_vz = np.exp(-2.0 * vz **2)
+        # 1. Velocity Tracking.
+        vel_err_xy = np.sqrt((vx - cmd_vx)**2 + (vy - cmd_vy)**2)
+        r_vel_xy = np.exp(-vel_err_xy)
+        r_yaw = np.exp(-np.abs(yaw_rate - cmd_yaw))
+        r_vz = np.exp(np.abs(vz))
 
         # 2. Posture
         r_height = np.exp(-40.0 * (z - self.TARGET_HEIGHT) **2)
@@ -189,7 +193,7 @@ class VelocityAntEnv(gym.Wrapper):
         r_symmetry = -self.W_SYMMETRY * np.std(leg_activity)
 
         # 6. Alive Bonus
-        r_alive = self.W_ALIVE
+        r_alive = self.W_ALIVE * r_vel_xy
 
         # Final Reward
         reward = (
