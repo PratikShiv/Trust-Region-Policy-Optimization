@@ -36,18 +36,20 @@ class PolicyNetwork(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_sizes=(256, 256)):
         super().__init__()
         self.mean_net = build_mlp(obs_dim, act_dim, hidden_sizes)
-        self.log_std = nn.Parameter(torch.zeros(act_dim))
+        self.log_std = nn.Parameter(torch.full((act_dim,), -0.5))
 
         # Small initial output -> Action start near zero
         with torch.no_grad():
             self.mean_net[-1].weight.data.mul_(0.01)
             self.mean_net[-1].bias.zero_()
 
+    LOG_STD_MIN = -2.0
+    LOG_STD_MAX = 0.5
     def forward(self, obs):
         # Return the normal distribution over actions
         mean = self.mean_net(obs)
-        std = torch.exp(self.log_std)
-        std = std.expand_as(mean)
+        log_std = self.log_std.clamp(self.LOG_STD_MAX, self.LOG_STD_MIN)
+        std = log_std.exp().expand_as(mean)
         return Normal(mean, std)
     
     @torch.no_grad()

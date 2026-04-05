@@ -53,9 +53,10 @@ class VelocityAntEnv(gym.Wrapper):
     W_ORIENT = 0.3
     W_ENERGY_TORQUE = 0.005
     W_ENERGY_JVEL = 0.0005
-    W_SMOOTH = 0.02
+    W_SMOOTH = 0.15
     W_SYMMETRY = 0.05
     W_ALIVE = 0.5
+    ACTION_FILTER_ALPHA=0.2
 
     def __init__(
             self,
@@ -88,13 +89,13 @@ class VelocityAntEnv(gym.Wrapper):
 
     def _sample_velocity_command(self):
         # Sample a random direction
-        vx = np.random.uniform(0.5, 2.0)
-        vy = np.random.uniform(-0.5, 0.5)
+        vx = np.random.uniform(0.3, 1.0)
+        vy = np.random.uniform(-0.3, 0.3)
         return np.array([
             vx,   # Vx (Forward / Backward)
             vy,   # Vy (Lateral)
             0.0,                            # Vz
-            np.random.uniform(-0.5, 0.5),   # Yaw Rate
+            np.random.uniform(-0.3, 0.3),   # Yaw Rate
         ], dtype=np.float32)
     
 
@@ -116,15 +117,17 @@ class VelocityAntEnv(gym.Wrapper):
         return self._augment_obs(obs), info
     
     def step(self, action):
-        obs, _reward, terminated, truncated, info = self.env.step(action)
+        filtered = (self.ACTION_FILTER_ALPHA * action
+                    + (1.0 - self.ACTION_FILTER_ALPHA) * self._prev_action)
+        obs, _reward, terminated, truncated, info = self.env.step(filtered)
         self._step_count += 1
 
         # Change command velocity every 'cmd_change_steps' to allow the NN to learn various input commands.
         if self._step_count % self.cmd_change_steps == 0:
             self._cmd_vel = self._sample_velocity_command()
 
-        reward = self._compute_reward(obs, action)
-        self._prev_action = action.copy()
+        reward = self._compute_reward(obs, filtered)
+        self._prev_action = filtered.copy()
 
         # Exit after reaching max number of steps in an episode
         if self._step_count >= self.max_episode_length:

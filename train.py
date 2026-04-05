@@ -329,7 +329,7 @@ def parse_args():
 
     # algorithm
     p.add_argument("--iterations", type=int, default=500)
-    p.add_argument("--batch_size", type=int, default=4096)
+    p.add_argument("--batch_size", type=int, default=8192)
     p.add_argument("--max_kl", type=float, default=0.003)
     p.add_argument("--damping", type=float, default=0.1)
     p.add_argument("--gamma", type=float, default=0.99)
