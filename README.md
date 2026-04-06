@@ -166,8 +166,6 @@ The experimental progression highlights critical insights for reinforcement lear
 git clone https://github.com/yourusername/trpo-ant-locomotion.git
 cd trpo-ant-locomotion
 
-# Install dependencies
-pip install -r requirements.txt
 ```
 
 ### Requirements
@@ -181,12 +179,12 @@ pip install -r requirements.txt
 
 ### Training
 ```bash
-python train.py --config config.yaml
+python train.py
 ```
 
 ### Evaluation
 ```bash
-python test.py --checkpoint checkpoints/best_model.pt --render
+python test.py
 ```
 
 ### Custom Commands
@@ -236,26 +234,6 @@ If you use this code in your research, please cite:
 ---
 
 *This repository is part of ongoing research in reinforcement learning for quadrupedal robotics. Contributions and collaborations are welcome!*
-
-## Usage
-
-### Training
-
-```bash
-python3 train.py --wandb
-python3 train.py --render
-python3 train.py --resume checkpoints/ckpt_100.pt
-```
-
-### Evaluation
-
-```bash
-python3 test.py --checkpoint checkpoints/best_model.pt
-python3 test.py --checkpoint checkpoints/best_model.pt --cmd_vx 1.5 --cmd_vy 0.0
-python3 test.py --checkpoint checkpoints/best_model.pt --stochastic
-```
-
-> Note: Current training code initializes Weights & Biases unconditionally, so `wandb` must be installed even if `--wandb` is not provided.
 
 ## Limitations
 
