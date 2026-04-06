@@ -3,13 +3,16 @@ We use Ant V-5 robot from gymnasium. This file acts as a wrapper around the envi
 We use this to define custom reward functions.
 
 Velocity-Constrained Ant Environment with Natural Gait Reward
-    1. Append a velocity command (Vx, Vy, Vz) to the observation
+    1. Walk stright ahead with a fixed velocity
     2. Replace the default reward with a multi-component reward that
         encourages natural quadruped locomotion at the commanded velocity.
+    3. Domain Randomization
 """
 
-import numpy as np
+from collections import deque
+
 import gymnasium as gym
+import numpy as np
 from gymnasium import spaces
 
 def quat_to_rpy(quat):
@@ -18,7 +21,7 @@ def quat_to_rpy(quat):
     """
     w, x, y, z = quat
     sinr = 2.0 * (w*x + y*x)
-    cosr = 1.9 - 2.0*(x*x + y*y)
+    cosr = 1.0 - 2.0*(x*x + y*y)
     roll = np.arctan2(sinr, cosr)
     
     sinp = np.clip(2.0 * (w*y - z*x), -1.0, 1.0)
@@ -34,39 +37,55 @@ class VelocityAntEnv(gym.Wrapper):
     """
     Gymnasium Ant with velocity command conditioning and a natural gait reward.
 
-    Observation layout: [base_obs (27), cmd_vx, cmd_vy, cmd_vz, cmd_yaw_rate]
+    Observation layout: [base_obs (27)]
     Action Space: Unchanged (8 continous torques)
 
-    Velocity commands are re-sampled every ''cmd_change_steps''' steps so the
-    policy learns to track a range of velocities rather than a single one.
+    Walk straight ahead at a fixed speed
+
+    Domain Randomization:
+    - Total Mass scaling
+    - Tangential Friction Scaling
+    - Action Transport delay
+    - Observation transport delay
     """
 
     HEALTHY_Z_RANGE = (0.3, 1.0)
     TARGET_HEIGHT = 0.57
+    TARGET_VX = 1.0
 
     # --------------------------------------------------------------------------------
     # Reward Weights.
-    W_VEL_XY = 2.5
-    W_YAW = 0.3
+    W_FORWARD = 3.0
+    W_LATERAL = 1.0
     W_VZ = 0.2
     W_HEIGHT = 0.3
-    W_ORIENT = 0.2
+    W_ORIENT = 0.3
     W_ENERGY_TORQUE = 0.003
     W_ENERGY_JVEL = 0.0003
     W_SMOOTH = 0.04
     W_SYMMETRY = 0.03
     W_ALIVE = 0.5
     W_STAND_PENALTY=0.8
+
     ACTION_FILTER_ALPHA=0.5
 
     def __init__(
             self,
             render_mode = None,
             max_episode_length=1000,
-            cmd_change_steps=200,
+            randomize_mass = False,
+            mass_scale_range=(0.9, 1.1),
+            randomize_friction = False,
+            friction_scale_range=(0.7, 1.3),
+            randomize_action_delay = False,
+            action_delay_range=(0, 2),
+            randomize_obs_delay=False,
+            obs_delay_range=(0,0),
+            randomization_seed=42,
     ):
         base_env = gym.make(
-            "Ant-v5",
+            "Ant-v4",
+            use_contact_forces=False,
             terminate_when_unhealthy=True,
             healthy_z_range=self.HEALTHY_Z_RANGE,
             render_mode=render_mode
@@ -74,72 +93,145 @@ class VelocityAntEnv(gym.Wrapper):
         super().__init__(base_env)
 
         self.max_episode_length = max_episode_length
-        self.cmd_change_steps = cmd_change_steps
+        
+        # Domain Randomization Config
+        self._rng = np.random.default_rng(randomization_seed)
+        self.randomize_mass = randomize_mass
+        self.mass_scale_range = tuple(mass_scale_range)
+        self.randomize_friction = randomize_friction
+        self.friction_scale_range = tuple(friction_scale_range)
+        self.randomize_action_delay = randomize_action_delay
+        self.action_delay_range = tuple(int(x) for x in action_delay_range)
+        self.randomize_obs_delay = randomize_obs_delay
+        self.obs_delay_range = tuple(int(x) for x in obs_delay_range)
 
+        # Cache nominal MuJuCo model properties so randomization ever compoints
+        model = self.env.unwrapped.model
+        self._nominal_body_mass = model.body_mass.copy()
+        self._nominal_geom_friction = model.geom_friction.copy()
+
+        # DR bookkeeping. Set Properly on every reset
+        self._action_delay_steps = 0
+        self._obs_delay_steps = 0
+        self._action_buffer: deque = deque()
+        self.obs_buffer: deque = deque()
+        self._dr_info = {
+            "mass_scale": 1.0,
+            "friction_scale": 1.0,
+            "action_delay_steps": 0,
+            "obs_delay_steps": 0,
+        }
+
+        # Observation space stays at base 27 dims. 
         base_obs_dim = self.observation_space.shape[0] # 27
-        low = np.full(base_obs_dim + 4, -np.inf, dtype=np.float32)
-        high = np.full(base_obs_dim + 4, np.inf, dtype=np.float32)
-        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(base_obs_dim,),
+            dtype=np.float32)
 
-        self._cmd_vel = np.zeros(4, dtype=np.float32)
         self._prev_action = np.zeros(self.action_space.shape[0], dtype=np.float32)
         self._step_count = 0
+        self._episode_return = 0.0
 
     # --------------------------------------------------------------------------------
-    # Velocity Command Sampling
+    # Domain Randomization
 
-    def _sample_velocity_command(self):
-        # Sample a random direction
-        vx = np.random.uniform(0.3, 1.0)
-        vy = np.random.uniform(-0.3, 0.3)
-        return np.array([
-            vx,   # Vx (Forward / Backward)
-            vy,   # Vy (Lateral)
-            0.0,                            # Vz
-            np.random.uniform(-0.3, 0.3),   # Yaw Rate
-        ], dtype=np.float32)
-    
+    def _apply_domain_randomization(self):
+        model = self.env.unwrapped.model
 
-    # --------------------------------------------------------------------------------
-    # Observation Augmentation
-    
-    def _augment_obs(self, obs):
-        return np.concatenate([obs, self._cmd_vel]).astype(np.float32)
-    
+        # Always restore nominal values first
+        model.body_mass[:] = self._nominal_body_mass
+        model.geom_friction[:] = self._nominal_geom_friction
 
+        mass_scale = 1.0
+        friction_scale = 1.0
+        action_delay = 0
+        obs_delay = 0
+
+        if self.randomize_mass:
+            mass_scale = float(self._rng.uniform(*self.mass_scale_range))
+            model.body_mass[1:] = self._nominal_body_mass[1:] * mass_scale
+
+        if self.randomize_friction:
+            friction_scale = float(self._rng.uniform(*self.friction_scale_range))
+            model.geom_friction[:, 0] = self._nominal_geom_friction[:, 0] * friction_scale
+
+        if self.randomize_action_delay:
+            action_delay = int(self._rng.integers(
+                self.action_delay_range[0], self.action_delay_range[1] + 1,
+            ))
+
+        if self.randomize_obs_delay:
+            obs_delay = int(self._rng.integers(
+                self.obs_delay_range[0], self.obs_delay_range[1] + 1,
+            ))
+
+        self._action_delay_steps = action_delay
+        self._obs_delay_steps = obs_delay
+        self._dr_info = {
+            "mass_scale": mass_scale,
+            "friction_scale": friction_scale,
+            "action_delay_steps": action_delay,
+            "obs_delay_steps": obs_delay,
+        }
+
+    def _reset_delay_buffer(self, initial_obs):
+        zero_action = np.zeros(self.action_space.shape[0], dtype=np.float32)
+        self._action_buffer = deque(
+            [zero_action.copy() for _ in range(self._action_delay_steps + 1)],
+            maxlen=self._action_delay_steps + 1,
+        )
+        self._obs_buffer = deque(
+            [initial_obs.copy() for _ in range(self._obs_delay_steps + 1)],
+            maxlen=self._obs_delay_steps + 1,
+        )
+        
     # --------------------------------------------------------------------------------
     # Gym API
     
     def reset(self, **kwargs):
+        self._apply_domain_randomization()
         obs, info = self.env.reset(**kwargs)
-        self._cmd_vel = self._sample_velocity_command()
         self._prev_action = np.zeros(self.action_space.shape[0], dtype=np.float32)
         self._step_count = 0
-        return self._augment_obs(obs), info
+
+        obs = obs.astype(np.float32)
+        self._reset_delay_buffer(obs)
+
+        info.update(self._dr_info)
+        return self._obs_buffer[0].copy(), info
     
     def step(self, action):
-        filtered = (self.ACTION_FILTER_ALPHA * action
+        self._action_buffer.append(np.asarray(action, dtype=np.float32).copy())
+        command = self._action_buffer[0]
+        
+        filtered = (self.ACTION_FILTER_ALPHA * command
                     + (1.0 - self.ACTION_FILTER_ALPHA) * self._prev_action)
+        
         obs, _reward, terminated, truncated, info = self.env.step(filtered)
         self._step_count += 1
 
-        # Change command velocity every 'cmd_change_steps' to allow the NN to learn various input commands.
-        if self._step_count % self.cmd_change_steps == 0:
-            self._cmd_vel = self._sample_velocity_command()
-
         reward = self._compute_reward(obs, filtered)
         self._prev_action = filtered.copy()
+        self._episode_return += reward
 
         # Exit after reaching max number of steps in an episode
         if self._step_count >= self.max_episode_length:
             truncated = True
 
-        info["cmd_vel"] = self._cmd_vel.copy()
-        info["velocity_error_xy"] = np.sqrt(
-            (obs[13] - self._cmd_vel[0]) ** 2 + (obs[14] - self._cmd_vel[1]) **2
-        )
+        obs = obs.astype(np.float32)
+        self._obs_buffer.append(obs.copy())
 
-        return self._augment_obs(obs), reward, terminated, truncated, info
+        vx, vy = obs[13], obs[14]
+        info["forward_speed"] = float(vx)
+        info["lateral_speed"] = float(vy)
+        info["velocity_error"] = float(np.abs(vx - self.TARGET_VX))
+
+        if terminated or truncated:
+            info["episode_return"] = self._episode_return
+
+        return self._obs_buffer[0].copy(), reward, terminated, truncated, info
     
 
     # --------------------------------------------------------------------------------
@@ -163,19 +255,17 @@ class VelocityAntEnv(gym.Wrapper):
         joint_vel = obs[19:27]
         vx, vy, vz = obs[13], obs[14], obs[15]
         yaw_rate = obs[18]
-        cmd_vx, cmd_vy, cmd_vz, cmd_yaw = self._cmd_vel
 
         roll, pitch, _ = quat_to_rpy(quat)
 
         # 1. Velocity Tracking.
-        vel_err_xy = np.sqrt((vx - cmd_vx)**2 + (vy - cmd_vy)**2)
-        r_vel_xy = np.exp(-vel_err_xy)
-        r_yaw = np.exp(-np.abs(yaw_rate - cmd_yaw))
-        r_vz = np.exp(np.abs(vz))
+        r_forward = self.W_FORWARD * np.exp(-2.0 * (vx - self.TARGET_VX) ** 2)
+        r_lateral = -self.W_LATERAL * vy ** 2
+        r_vz = self.W_VZ * vz ** 2 
 
         # 2. Posture
-        r_height = np.exp(-40.0 * (z - self.TARGET_HEIGHT) **2)
-        r_orient = np.exp(-5.0 * (roll **2 + pitch **2))
+        r_height = self.W_HEIGHT *  np.exp(-40.0 * (z - self.TARGET_HEIGHT) **2)
+        r_orient = self.W_ORIENT * np.exp(-5.0 * (roll **2 + pitch **2))
 
         # 3. Energy Efficiency
         r_energy = (
@@ -197,7 +287,7 @@ class VelocityAntEnv(gym.Wrapper):
         r_symmetry = -self.W_SYMMETRY * np.std(leg_activity)
 
         # 6. Alive Bonus
-        r_alive = self.W_ALIVE * r_vel_xy
+        r_alive = self.W_ALIVE
 
         # 7. Stand Penalty
         speed_xy = np.sqrt(vx**2 + vy**2)
@@ -206,11 +296,11 @@ class VelocityAntEnv(gym.Wrapper):
 
         # Final Reward
         reward = (
-            self.W_VEL_XY * r_vel_xy
-            + self.W_YAW * r_yaw
-            + self.W_VZ * r_vz
-            + self.W_HEIGHT * r_height
-            + self.W_ORIENT * r_orient
+            r_forward
+            + r_lateral
+            + r_vz
+            + r_height
+            + r_orient
             + r_energy
             + r_smooth
             + r_symmetry

@@ -32,6 +32,7 @@ import torch
 # Running statistics for observation / return normalization
 class RunningMeanStd:
     """Welford's online algorithm for tracking mean and variance"""
+
     def __init__(self, shape=(), clip=10.0):
         self.mean = np.zeros(shape, dtype=np.float64)
         self.var = np.ones(shape, dtype=np.float64)
@@ -116,31 +117,6 @@ def conjugate_gradient(fvp_fn, b, max_iter=10, residual_tol=1e-10):
     return x
 
 
-# --------------------------------------------------------------------------------
-"""
-    Generalized Advantage Estimation
-
-    Â+t = ∑_{l=0}^{∞} (γλ)^l · δ_{t+l}
-    where δ_t = t_t + γ V(s_{t+1} - V(s_t))
-"""
-
-def comput_gae(rewards, values, dones, gamma=0.99, lam=0.97):
-    # Return the (advantage, returns) as numpy arrays
-    n  = len(rewards)
-    advantages = np.zeros(n, dtype=np.float32)
-    last_gae = 0
-
-    for t in reversed(range(n)):
-        next_value = 0.0 if (t == n - 1 or dones[t]) else values[t+1]
-        next_non_terminal = 1.0 - dones[t]
-        delta = rewards[t] + gamma * lam * next_non_terminal * values[t]
-        last_gae = delta + gamma * lam * next_non_terminal * last_gae
-        advantages[t] = last_gae
-
-    returns = advantages + values
-    return advantages, returns
-
-
 # ----------------------------------------------------------------------------------
 
 class TRPOAgent:
@@ -173,7 +149,7 @@ class TRPOAgent:
         value_epochs = 5,
         cg_iters = 10,
         ls_steps = 10,
-        ls_decay = 10,
+        ls_decay = 0.8,
         device = "cpu",
     ):
         self.policy = policy

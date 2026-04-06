@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
+
 def build_mlp(in_dim, out_dim, hidden_size, activation=nn.Tanh):
     """
     Build the NN layer
@@ -45,6 +46,7 @@ class PolicyNetwork(nn.Module):
 
     LOG_STD_MIN = -2.0
     LOG_STD_MAX = 0.5
+    
     def forward(self, obs):
         # Return the normal distribution over actions
         mean = self.mean_net(obs)

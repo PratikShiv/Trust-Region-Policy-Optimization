@@ -4,26 +4,11 @@ Test / Evaluate a trained TRPO policy on the Velocity-Conditioned Ant.
 This script loads a saved checkpoint, fires up the MuJoCo GUI so you can
 watch the ant walk, and prints live stats to the terminal.
 
-Usage
------
-  # Run the best saved model with the MuJoCo 3-D viewer:
-  python test.py --checkpoint checkpoints/best_model.pt
-
-  # Use a specific velocity command instead of random ones:
-  python test.py --checkpoint checkpoints/best_model.pt --cmd_vx 1.5 --cmd_vy 0.0
-
-  # Run 5 episodes, then quit automatically:
-  python test.py --checkpoint checkpoints/best_model.pt --episodes 5
-
-  # Use stochastic (sampled) actions instead of the deterministic mean:
-  python test.py --checkpoint checkpoints/best_model.pt --stochastic
 """
 
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------
 # Imports
-# ─────────────────────────────────────────────────────────────────────
-import argparse
-import sys
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -42,9 +27,8 @@ from models import PolicyNetwork
 from trpo import RunningMeanStd
 
 
-# ─────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------
 # Helper: load a trained checkpoint from disk
-# ─────────────────────────────────────────────────────────────────────
 
 def load_trained_policy(checkpoint_path, device="cpu"):
     """
@@ -99,9 +83,8 @@ def load_trained_policy(checkpoint_path, device="cpu"):
     return policy, obs_rms, ckpt
 
 
-# ─────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helper: pick an action from the policy
-# ─────────────────────────────────────────────────────────────────────
 
 def select_action(policy, obs_numpy, stochastic, device="cpu", obs_rms=None):
     """
@@ -157,33 +140,55 @@ def run_evaluation(args):
 
     train_iter = ckpt.get("iteration", "?")
     train_reward = ckpt.get("best_reward", "?")
+    saved_args = ckpt.get("args", {})
     print(f"  Training iteration : {train_iter}")
     print(f"  Best train return  : {train_reward}")
     print(f"  Network hidden     : {ckpt['hidden']}")
     print()
 
+    # Resolve DR settings.
+    if args.domain_rand is None:
+        use_dr = any(saved_args.get(k, False) for k in
+                                                ("randomize_mass",
+                                                 "randomize_friction",
+                                                 "randomize_action_delay",
+                                                 "randomize_obs_delay"))
+    else:
+        use_dr = args.domain_rand
+
+    
+    dr_kwargs = {}
+    if use_dr:
+        dr_kwargs = {
+            "randomize_mass": saved_args.get("randomize_mass", False),
+            "mass_scale_range": (
+                saved_args.get("mass_min_scale", 0.9),
+                saved_args.get("mass_max_scale", 1.1),
+            ),
+            "randomize_friction": saved_args.get("randomize_friction", False),
+            "friction_scale_range": (
+                saved_args.get("friction_min_scale", 0.7),
+                saved_args.get("friction_max_scale", 1.3),
+            ),
+            "randomize_action_delay": saved_args.get("randomize_action_delay", False),
+            "action_delay_range": (
+                saved_args.get("action_delay_min", 0),
+                saved_args.get("action_delay_max", 2),
+            ),
+            "randomize_obs_delay": saved_args.get("randomize_obs_delay", False),
+            "obs_delay_range": (
+                saved_args.get("obs_delay_min", 0),
+                saved_args.get("obs_delay_max", 0),
+            ),
+        }
+
     # ── 2. Create the environment with the MuJoCo 3-D viewer ─────────
     #    render_mode="human" opens a window where you can see the ant.
-    env = VelocityAntEnv(render_mode="human")
+    env = VelocityAntEnv(render_mode="human", **dr_kwargs)
 
-    # If the user specified a fixed velocity command, we'll override the
-    # random sampling that normally happens inside the environment.
-    use_fixed_cmd = any(
-        x is not None for x in [args.cmd_vx, args.cmd_vy, args.cmd_vz, args.cmd_yaw]
-    )
-    if use_fixed_cmd:
-        fixed_cmd = np.array([
-            args.cmd_vx  if args.cmd_vx  is not None else 0.0,
-            args.cmd_vy  if args.cmd_vy  is not None else 0.0,
-            args.cmd_vz  if args.cmd_vz  is not None else 0.0,
-            args.cmd_yaw if args.cmd_yaw is not None else 0.0,
-        ], dtype=np.float32)
-        print(f"Using FIXED velocity command: "
-              f"Vx={fixed_cmd[0]:.2f}  Vy={fixed_cmd[1]:.2f}  "
-              f"Vz={fixed_cmd[2]:.2f}  yaw={fixed_cmd[3]:.2f}")
-    else:
-        print("Velocity commands will be sampled randomly each episode.")
-
+    dr_flags = [k for k in ("randomize_mass", "randomize_friction", "randomize_action_delay", "randomize_obs_delay")
+                if dr_kwargs.get(k, False)]
+    
     mode_str = "STOCHASTIC" if args.stochastic else "DETERMINISTIC"
     print(f"Action mode: {mode_str}")
     print(f"Episodes to run: {'∞ (Ctrl-C to stop)' if args.episodes == 0 else args.episodes}")
@@ -207,21 +212,12 @@ def run_evaluation(args):
             # override it below).
             obs, info = env.reset()
 
-            # Override the random velocity command if the user specified one.
-            if use_fixed_cmd:
-                env._cmd_vel = fixed_cmd.copy()
-                # Re-augment observation with the fixed command.
-                obs = np.concatenate([obs[:-4], fixed_cmd]).astype(np.float32)
-
             done = False
             ep_return = 0.0       # total reward this episode
             ep_steps = 0          # timesteps this episode
             ep_vel_errors = []    # per-step velocity tracking error
 
             print(f"── Episode {episode_num} ──")
-            cmd = env._cmd_vel
-            print(f"  Command: Vx={cmd[0]:+.2f}  Vy={cmd[1]:+.2f}  "
-                  f"Vz={cmd[2]:+.2f}  yaw={cmd[3]:+.2f}")
 
             while not done:
                 # Ask the policy for an action.
@@ -238,14 +234,16 @@ def run_evaluation(args):
                 ep_return += reward
                 ep_steps += 1
 
-                if "velocity_error_xy" in info:
-                    ep_vel_errors.append(info["velocity_error_xy"])
+                if "velocity_error" in info:
+                    ep_vel_errors.append(info["velocity_error"])
 
                 # Print a progress dot every 100 steps so you know it's alive
                 if ep_steps % 100 == 0:
                     avg_err = np.mean(ep_vel_errors[-100:]) if ep_vel_errors else 0
+                    fw_spd = info.get("forward_speed", 0.0)
                     print(f"    step {ep_steps:4d}  |  "
                           f"reward so far: {ep_return:8.1f}  |  "
+                          f"fwd: {fw_spd:5.2f} m/s  |  "
                           f"vel_err(last 100): {avg_err:.3f}")
 
             # ── Episode summary ───────────────────────────────────────
@@ -282,43 +280,12 @@ def run_evaluation(args):
 # ─────────────────────────────────────────────────────────────────────
 # Command-line interface
 # ─────────────────────────────────────────────────────────────────────
-
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="Evaluate a trained TRPO Ant policy with the MuJoCo viewer",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python test.py --checkpoint checkpoints/best_model.pt
-  python test.py --checkpoint checkpoints/best_model.pt --cmd_vx 1.0 --cmd_vy 0.0
-  python test.py --checkpoint checkpoints/best_model.pt --episodes 10
-  python test.py --checkpoint checkpoints/best_model.pt --stochastic
-""",
-    )
-
-    # required
-    p.add_argument("--checkpoint", type=str, required=True,
-                   help="Path to a .pt checkpoint file saved during training")
-
-    # behaviour
-    p.add_argument("--episodes", type=int, default=0,
-                   help="Number of episodes to run (0 = infinite, Ctrl-C to stop)")
-    p.add_argument("--stochastic", action="store_true",
-                   help="Sample actions from the policy distribution "
-                        "(default: use deterministic mean)")
-
-    # optional fixed velocity command
-    p.add_argument("--cmd_vx", type=float, default=None,
-                   help="Fixed forward velocity command (m/s)")
-    p.add_argument("--cmd_vy", type=float, default=None,
-                   help="Fixed lateral velocity command (m/s)")
-    p.add_argument("--cmd_vz", type=float, default=None,
-                   help="Fixed vertical velocity command (m/s, usually 0)")
-    p.add_argument("--cmd_yaw", type=float, default=None,
-                   help="Fixed yaw-rate command (rad/s)")
-
-    return p.parse_args()
-
+CONFIG = SimpleNamespace(
+    checkpoint = "checkpoints/best_model.pt",
+    episodes = 0,
+    stochastic = False,
+    domain_rand = None,
+)
 
 if __name__ == "__main__":
-    run_evaluation(parse_args())
+    run_evaluation(CONFIG)
