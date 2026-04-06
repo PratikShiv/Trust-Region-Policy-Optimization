@@ -16,7 +16,7 @@ import torch
 # These are the modules we wrote during training.
 # "environment" contains our custom Ant wrapper that adds velocity
 # commands to the observation and computes our natural-gait reward.
-from enviorment_wrapper import VelocityAntEnv
+from enviorment_wrapper import VelocityAntEnv, quat_to_rpy
 
 # "models" contains the neural network architectures:
 #   - PolicyNetwork:  takes an observation, outputs a probability
@@ -25,6 +25,9 @@ from enviorment_wrapper import VelocityAntEnv
 #                     so we could inspect it if we wanted.
 from models import PolicyNetwork
 from trpo import RunningMeanStd
+
+# Simulation dy = 0.01s. Control step of 0.05 seconds
+_DT = 0.05
 
 
 # -----------------------------------------------------------------------
@@ -184,7 +187,8 @@ def run_evaluation(args):
 
     # ── 2. Create the environment with the MuJoCo 3-D viewer ─────────
     #    render_mode="human" opens a window where you can see the ant.
-    env = VelocityAntEnv(render_mode="human", **dr_kwargs)
+    fixed_cmd = (args.cmd_vx, args.cmd_vy, args.cmd_yaw_rate)
+    env = VelocityAntEnv(render_mode="human", fixed_command=fixed_cmd, **dr_kwargs)
 
     dr_flags = [k for k in ("randomize_mass", "randomize_friction", "randomize_action_delay", "randomize_obs_delay")
                 if dr_kwargs.get(k, False)]
@@ -216,10 +220,36 @@ def run_evaluation(args):
             ep_return = 0.0       # total reward this episode
             ep_steps = 0          # timesteps this episode
             ep_vel_errors = []    # per-step velocity tracking error
+            target_yaw = 0.0
 
             print(f"── Episode {episode_num} ──")
 
             while not done:
+                if args.world_frame:
+                    # Rotate world grame command into body frame
+                    _, _, yaw = quat_to_rpy(obs[1:5])
+                    cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+
+                    env._cmd_vx = args.cmd_vx * cos_y + args.cmd_vy * sin_y
+                    env._cmd_vy = -args.cmd_vx * sin_y + args.cmd_vy * cos_y
+
+                    if args.heading_control:
+                        # Inegrate desired heading
+                        target_yaw += args.cmd_yaw_rate * _DT
+                        # Wrap target to [-pi, pi] to avoid unbounded growth
+                        target_yaw = (target_yaw + np.pi) % (2 * np.pi) - np.pi
+                        # heading error
+                        heading_err = target_yaw - yaw
+                        heading_err = (heading_err + np.pi) % (2* np.pi) - np.pi
+                        # P-controller for yaw rate
+                        env._cmd_yaw_rate = float(
+                            np.clip(args.heading_kp * heading_err,
+                                    -args.heading_max_rate,
+                                    args.heading_max_rate)
+                        )
+
+                    obs = env._append_cmd(obs[:27])
+                
                 # Ask the policy for an action.
                 action = select_action(policy, obs, args.stochastic, device, obs_rms=obs_rms)
 
@@ -240,10 +270,13 @@ def run_evaluation(args):
                 # Print a progress dot every 100 steps so you know it's alive
                 if ep_steps % 100 == 0:
                     avg_err = np.mean(ep_vel_errors[-100:]) if ep_vel_errors else 0
-                    fw_spd = info.get("forward_speed", 0.0)
+                    bvx = info.get("body_vx", 0.0)
+                    bvy = info.get("body_vy", 0.0)
+                    wz = info.get("yaw_rate", 0.0)
                     print(f"    step {ep_steps:4d}  |  "
                           f"reward so far: {ep_return:8.1f}  |  "
-                          f"fwd: {fw_spd:5.2f} m/s  |  "
+                          f"bvx: {bvx:5.2f} bvy: {bvy:5.2f}  "
+                          f"wz: {wz: 5.2f}  |  "
                           f"vel_err(last 100): {avg_err:.3f}")
 
             # ── Episode summary ───────────────────────────────────────
@@ -285,6 +318,17 @@ CONFIG = SimpleNamespace(
     episodes = 0,
     stochastic = False,
     domain_rand = None,
+    cmd_vx = 0.0,
+    cmd_vy = 0.5,
+    cmd_yaw_rate = -0.4,
+
+    # Set to True to interpet commands in world frame
+    world_frame = False,
+
+    # heading control
+    heading_control = False,
+    heading_kp = 5.0,
+    heading_max_rate = 1.0,
 )
 
 if __name__ == "__main__":

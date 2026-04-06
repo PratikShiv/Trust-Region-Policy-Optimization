@@ -47,6 +47,9 @@ def _env_kwards(args, *, render_mode=None, seed_offset=0):
     # Build the kwargs dict for a sigle VelocityAntEnv instance
     return {
         "render_mode": render_mode,
+        "cmd_vx_range": (args.cmd_vx_min, args.cmd_vx_max),
+        "cmd_vy_range": (args.cmd_vy_min, args.cmd_vy_max),
+        "cmd_yaw_rate_range": (args.cmd_yaw_rate_min, args.cmd_yaw_rate_max),
         "randomize_mass": args.randomize_mass,
         "mass_scale_range": (args.mass_min_scale, args.mass_max_scale),
         "randomize_friction": args.randomize_friction,
@@ -138,6 +141,7 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device,
     episode_returns = []
     episode_lengths = []
     vel_errors = []
+    yaw_rate_errors = []
     mass_scales = []
     friction_scales = []
     action_delays = []
@@ -182,6 +186,8 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device,
 
         if "velocity_error" in infos:
             vel_errors.extend(np.asarray(infos["velocity_error"]).ravel().tolist())
+        if "yaw_rate_error" in infos:
+            yaw_rate_errors.extend(np.asarray(infos["yaw_rate_error"]).ravel().tolist())
         if "mass_scale" in infos:
             mass_scales.extend(np.asarray(infos["mass_scale"]).ravel().tolist())
         if "friction_scale" in infos:
@@ -250,6 +256,7 @@ def collect_trajectories(env, policy, value_fn, batch_size, gamma, lam, device,
         "mean_ep_len": np.mean(episode_lengths) if episode_lengths else 0.0,
         "num_episodes": len(episode_lengths),
         "mean_vel_error": np.mean(vel_errors) if vel_errors else 0.0,
+        "mean_yaw_rate_error": np.mean(yaw_rate_errors) if yaw_rate_errors else 0.0,
         "mean_mass_scale": np.mean(mass_scales) if mass_scales else 0.0,
         "mean_friction_scale": np.mean(friction_scales) if friction_scales else 0.0,
         "mean_action_delay": np.mean(action_delays) if action_delays else 0.0,
@@ -370,6 +377,7 @@ def train(args):
                 "return/max": stats["max_return"],
                 # Velocity Tracking
                 "velocity_error": stats["mean_vel_error"],
+                "yaw_rate_error": stats["mean_yaw_rate_error"],
                 # TRPO Diagnostics
                 "trpo/surrogate_loss": info["surrogate"],
                 "trpo/kl_divergence": info["kl"],
@@ -419,24 +427,32 @@ def train(args):
 # CLI
 CONFIG = SimpleNamespace(
     # Algorithm
-    iterations = 500,
-    batch_size = 8192,
-    max_kl = 0.01,
+    iterations = 3000,
+    batch_size = 24576,
+    max_kl = 0.03,
     damping = 0.1,
     gamma = 0.99,
     lam = 0.97,
     value_lr = 1e-3,
-    value_epochs = 10,
+    value_epochs = 5,
     cg_iters = 10,
     hidden=256,
     seed=42,
-    num_envs = 4,
+    num_envs = 10,
 
     # Checkpoints
     save_dir = "checkpoints",
     save_every = 50,
     resume = None,
     render = False,
+
+    # Command Range
+    cmd_vx_min = 0.0,
+    cmd_vx_max = 1.5,
+    cmd_vy_min = 0.0,
+    cmd_vy_max = 1.5,
+    cmd_yaw_rate_min = -0.5,
+    cmd_yaw_rate_max = 0.5,
 
     # Domain Randomization
     randomize_mass = True,

@@ -15,6 +15,8 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 import os
+import pybullet as p
+import pybullet_data
 
 # Resolve path relative to this file (robust & professional)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,12 +58,12 @@ class VelocityAntEnv(gym.Wrapper):
 
     HEALTHY_Z_RANGE = (0.3, 1.0)
     TARGET_HEIGHT = 0.57
-    TARGET_VX = 1.0
 
     # --------------------------------------------------------------------------------
     # Reward Weights.
     W_FORWARD = 3.0
-    W_LATERAL = 1.0
+    W_LATERAL = 3.0
+    W_YAW = 1.0
     W_VZ = 0.2
     W_HEIGHT = 0.3
     W_ORIENT = 0.3
@@ -69,7 +71,7 @@ class VelocityAntEnv(gym.Wrapper):
     W_ENERGY_JVEL = 0.0003
     W_SMOOTH = 0.04
     W_SYMMETRY = 0.03
-    W_ALIVE = 0.5
+    W_ALIVE = 0.2
     W_STAND_PENALTY=0.8
 
     ACTION_FILTER_ALPHA=0.5
@@ -78,6 +80,10 @@ class VelocityAntEnv(gym.Wrapper):
             self,
             render_mode = None,
             max_episode_length=1000,
+            cmd_vx_range=(-1.5, 1.5),
+            cmd_vy_range=(-1.5, 1.5),
+            cmd_yaw_rate_range=(-0.5, 0.5),
+            fixed_command=None,
             randomize_mass = False,
             mass_scale_range=(0.9, 1.1),
             randomize_friction = False,
@@ -99,6 +105,16 @@ class VelocityAntEnv(gym.Wrapper):
         super().__init__(base_env)
 
         self.max_episode_length = max_episode_length
+        
+        # Command configs
+        self.cmd_vx_range = tuple(cmd_vx_range)
+        self.cmd_vy_range = tuple(cmd_vy_range)
+        self.cmd_yaw_rate_range = tuple(cmd_yaw_rate_range)
+        self.fixed_command = fixed_command
+
+        self._cmd_vx = 0.0
+        self._cmd_vy = 0.0
+        self._cmd_yaw_rate = 0.0
         
         # Domain Randomization Config
         self._rng = np.random.default_rng(randomization_seed)
@@ -128,17 +144,42 @@ class VelocityAntEnv(gym.Wrapper):
             "obs_delay_steps": 0,
         }
 
-        # Observation space stays at base 27 dims. 
+        # Observation space: Base 27 + 3 command dims = 30
         base_obs_dim = self.observation_space.shape[0] # 27
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(base_obs_dim,),
+            shape=(base_obs_dim + 3,),
             dtype=np.float32)
 
         self._prev_action = np.zeros(self.action_space.shape[0], dtype=np.float32)
         self._step_count = 0
         self._episode_return = 0.0
+
+    # Command sampling
+    def _sample_command(self):
+        if self.fixed_command is not None:
+            self._cmd_vx = float(self.fixed_command[0])
+            self._cmd_vy = float(self.fixed_command[1])
+            self._cmd_yaw_rate = float(self.fixed_command[2])
+        else:
+            self._cmd_vx = float(self._rng.uniform(*self.cmd_vx_range))
+            self._cmd_vy = float(self._rng.uniform(*self.cmd_vy_range))
+            self._cmd_yaw_rate = float(self._rng.uniform(*self.cmd_yaw_rate_range))
+
+    def _append_cmd(self, base_obs):
+        cmd = np.array([self._cmd_vx, self._cmd_vy, self._cmd_yaw_rate], dtype=np.float32)
+        return np.concatenate([base_obs, cmd])
+    
+    # Body Frame Velocity
+    def _body_frame_velocity(self, obs):
+        quat = obs[1:5]
+        world_vx, world_vy = obs[13], obs[14]
+        _, _, yaw = quat_to_rpy(quat)
+        cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+        body_vx = world_vx * cos_y + world_vy * sin_y
+        body_vy = -world_vx * sin_y + world_vy * cos_y
+        return body_vx, body_vy
 
     # --------------------------------------------------------------------------------
     # Domain Randomization
@@ -197,6 +238,7 @@ class VelocityAntEnv(gym.Wrapper):
     # Gym API
     
     def reset(self, **kwargs):
+        self._sample_command()
         self._apply_domain_randomization()
         obs, info = self.env.reset(**kwargs)
         self._prev_action = np.zeros(self.action_space.shape[0], dtype=np.float32)
@@ -206,7 +248,10 @@ class VelocityAntEnv(gym.Wrapper):
         self._reset_delay_buffer(obs)
 
         info.update(self._dr_info)
-        return self._obs_buffer[0].copy(), info
+        info["cmd_vx"] = self._cmd_vx
+        info["cmd_vy"] = self._cmd_vy
+        info["cmd_yaw_rate"] = self._cmd_yaw_rate
+        return self._append_cmd(self._obs_buffer[0].copy()), info
     
     def step(self, action):
         self._action_buffer.append(np.asarray(action, dtype=np.float32).copy())
@@ -229,15 +274,26 @@ class VelocityAntEnv(gym.Wrapper):
         obs = obs.astype(np.float32)
         self._obs_buffer.append(obs.copy())
 
-        vx, vy = obs[13], obs[14]
-        info["forward_speed"] = float(vx)
-        info["lateral_speed"] = float(vy)
-        info["velocity_error"] = float(np.abs(vx - self.TARGET_VX))
+        body_vx, body_vy = self._body_frame_velocity(obs)
+        wz = obs[18]
+
+        info["body_vx"] = float(body_vx)
+        info["body_vy"] = float(body_vy)
+        info["yaw_rate"] = float(wz)
+        info["forward_speed"] = float(obs[13])
+        info["lateral_speed"] = float(obs[14])
+        info["cmd_vx"] = self._cmd_vx
+        info["cmd_vy"] = self._cmd_vy
+        info["cmd_yaw_rate"] = self._cmd_yaw_rate
+        info["velocity_error"] = float(np.sqrt(
+            (body_vx - self._cmd_vx) ** 2 + (body_vy - self._cmd_vy) ** 2
+        ))
+        info["yaw_rate_error"] = float(np.abs(wz - self._cmd_yaw_rate))
 
         if terminated or truncated:
             info["episode_return"] = self._episode_return
 
-        return self._obs_buffer[0].copy(), reward, terminated, truncated, info
+        return self._append_cmd(self._obs_buffer[0].copy()), reward, terminated, truncated, info
     
 
     # --------------------------------------------------------------------------------
@@ -259,14 +315,16 @@ class VelocityAntEnv(gym.Wrapper):
         z = obs[0]
         quat = obs[1:5]
         joint_vel = obs[19:27]
-        vx, vy, vz = obs[13], obs[14], obs[15]
-        yaw_rate = obs[18]
+        vz = obs[15]
+        wz = obs[18]
 
         roll, pitch, _ = quat_to_rpy(quat)
+        body_vx, body_vy = self._body_frame_velocity(obs)
 
         # 1. Velocity Tracking.
-        r_forward = self.W_FORWARD * np.exp(-2.0 * (vx - self.TARGET_VX) ** 2)
-        r_lateral = -self.W_LATERAL * vy ** 2
+        r_forward = self.W_FORWARD * np.exp(-4.0 * (body_vx - self._cmd_vx) ** 2)
+        r_lateral = self.W_LATERAL * np.exp(-8.0 * (body_vy - self._cmd_vy) ** 2)
+        r_yaw     = self.W_YAW     * np.exp(-8.0 * (wz - self._cmd_yaw_rate) ** 2)
         r_vz = self.W_VZ * vz ** 2 
 
         # 2. Posture
@@ -290,13 +348,14 @@ class VelocityAntEnv(gym.Wrapper):
             np.abs(joint_vel[4]) + np.abs(joint_vel[5]),
             np.abs(joint_vel[6]) + np.abs(joint_vel[7]),
         ])
-        r_symmetry = -self.W_SYMMETRY * np.std(leg_activity)
+        yaw_factor = np.exp(-8.0 * self._cmd_yaw_rate ** 2)
+        r_symmetry = -self.W_SYMMETRY * yaw_factor * np.std(leg_activity)
 
         # 6. Alive Bonus
         r_alive = self.W_ALIVE
 
         # 7. Stand Penalty
-        speed_xy = np.sqrt(vx**2 + vy**2)
+        speed_xy = np.sqrt(body_vx**2 + body_vy**2)
         r_stand = -self.W_STAND_PENALTY * np.exp(-10.0 * speed_xy)
 
 
@@ -305,6 +364,7 @@ class VelocityAntEnv(gym.Wrapper):
             r_forward
             + r_lateral
             + r_vz
+            + r_yaw
             + r_height
             + r_orient
             + r_energy
