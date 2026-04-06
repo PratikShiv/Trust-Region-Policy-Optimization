@@ -14,6 +14,11 @@ from collections import deque
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
+import os
+
+# Resolve path relative to this file (robust & professional)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+xml_path = os.path.join(BASE_DIR, "xml", "ant_v4_updated.xml")
 
 def quat_to_rpy(quat):
     """
@@ -85,6 +90,7 @@ class VelocityAntEnv(gym.Wrapper):
     ):
         base_env = gym.make(
             "Ant-v4",
+            xml_file=xml_path,
             use_contact_forces=False,
             terminate_when_unhealthy=True,
             healthy_z_range=self.HEALTHY_Z_RANGE,
