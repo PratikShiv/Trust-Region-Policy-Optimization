@@ -224,10 +224,10 @@ If you use this code in your research, please cite:
 ```bibtex
 @misc{trpo-ant-locomotion,
   title={Trust-Region Policy Optimization for Velocity-Conditioned Ant Locomotion},
-  author={Your Name},
-  year={2024},
-  publisher={GitHub},
-  url={https://github.com/yourusername/trpo-ant-locomotion}
+  author={Pratik Shiveshwar},
+  year={2026},
+  publisher={PratikShiv},
+  url={https://github.com/PratikShiv/Trust-Region-Policy-Optimization}
 }
 ```
 
